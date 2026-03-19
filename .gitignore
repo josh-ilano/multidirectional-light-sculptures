@@ -22,4 +22,5 @@ Thumbs.db
 outputs/
 *.glb
 *.stl
-*.blend
+*.blend1
+*.blend2
