@@ -4,7 +4,7 @@ from image_io import load_binary_image, save_mask
 from voxel_ops import make_voxel_centers, voxel_pitch
 from shadow_hull import compute_shadow_hull
 from config import ShadowSource
-from export_mesh import export_voxels_to_stl, export_voxels_to_glb
+from export_mesh import export_voxels_to_stl
 from carve import carve_hollow_shell_strict
 from simulate import simulate_and_save
 from debug_slices import save_voxel_slices
@@ -104,10 +104,8 @@ def main():
 
     try:
         mesh = export_voxels_to_stl(hull, pitch, "outputs/meshes/shadow_hull.stl")
-        export_voxels_to_glb(hull, pitch, "outputs/meshes/shadow_hull.glb")
         print("\nSaved raw hull mesh:")
         print("  outputs/meshes/shadow_hull.stl")
-        print("  outputs/meshes/shadow_hull.glb")
         print("  vertices:", len(mesh.vertices))
         print("  faces:", len(mesh.faces))
         print("  watertight:", mesh.is_watertight)
@@ -169,10 +167,8 @@ def main():
     # Export carved mesh
     try:
         mesh = export_voxels_to_stl(carved, pitch, "outputs/meshes/shadow_carved.stl")
-        export_voxels_to_glb(carved, pitch, "outputs/meshes/shadow_carved.glb")
         print("\nSaved carved mesh:")
         print("  outputs/meshes/shadow_carved.stl")
-        print("  outputs/meshes/shadow_carved.glb")
         print("  vertices:", len(mesh.vertices))
         print("  faces:", len(mesh.faces))
         print("  watertight:", mesh.is_watertight)

@@ -11,7 +11,7 @@ This code takes as input one or more reference silhouette images and generates a
 - Fast greedy carving using per pixel support counts
 - Hollow shell generation for material reduction
 - Shadow simulation before fabrication
-- Mesh export to STL and GLB formats
+- Mesh export to STL format
 - Debug visualizations including voxel slices and shadow comparisons
 - Progress bars for long running optimization and carving stages
 
@@ -122,7 +122,6 @@ The pipeline generates:
 
 - `outputs/meshes/shadow_hull.stl`
 - `outputs/meshes/shadow_carved.stl`
-- GLB versions of meshes for visualization
 - Shadow simulation images per view
 - Debug voxel slice images
 - Console metrics including IoU, missing pixels, and reduction ratios
