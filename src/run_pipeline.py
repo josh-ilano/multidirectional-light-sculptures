@@ -4,14 +4,13 @@ import numpy as np
 from image_io import load_binary_image, save_mask
 from voxel_ops import make_voxel_centers, voxel_pitch
 from shadow_hull import compute_shadow_hull
-from config import ShadowSource
+from shadow_source import ShadowSource, build_sources
 from export_mesh import export_voxels_to_stl
 from carve import carve_hollow_shell_strict
 from simulate import simulate_and_save
 from debug_slices import save_voxel_slices
 from optimize_consistency import optimize_silhouettes
 from reset_output import reset_output_dirs
-
 
 # helper function to print out metrics per silhouette input view
 def print_view_metrics(name, summaries):
@@ -26,7 +25,7 @@ def print_view_metrics(name, summaries):
             f"extra={m['extra_pixels']}"
         )
 
-
+# helper function for parsing command line arguments
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Build a shadow hull from 1, 2, or 3 silhouette images."
@@ -73,44 +72,6 @@ def parse_args():
     return args
 
 
-def build_sources(images, world_size):
-    """
-    Assign a default orthographic direction/up pair for up to 3 views.
-    View 0: +X
-    View 1: +Z
-    View 2: +Y
-    """
-    view_configs = [
-        {
-            "direction": np.array([1, 0, 0], dtype=float),
-            "up": np.array([0, 1, 0], dtype=float),
-        },
-        {
-            "direction": np.array([0, 0, 1], dtype=float),
-            "up": np.array([0, 1, 0], dtype=float),
-        },
-        {
-            "direction": np.array([0, 1, 0], dtype=float),
-            "up": np.array([0, 0, 1], dtype=float),
-        },
-    ]
-
-    sources = []
-    for i, img in enumerate(images):
-        cfg = view_configs[i]
-        sources.append(
-            ShadowSource(
-                image=img,
-                direction=cfg["direction"],
-                up=cfg["up"],
-                world_center=np.array([0, 0, 0], dtype=float),
-                world_size=world_size,
-            )
-        )
-
-    return sources
-
-
 def main():
     # parse command line args
     args = parse_args()
@@ -142,18 +103,22 @@ def main():
     for i, src in enumerate(sources):
         print(f"[PIPELINE] shadow source {i}: direction={src.direction}, up={src.up}")
 
+    # calculate the voxel centers for the given params
     voxel_centers = make_voxel_centers(nx, ny, nz, world_size)
 
     # optimize silhouettes to allow arbitrary silhouette inputs
     optimized_sources = optimize_silhouettes(
         sources,
         voxel_centers,
-        iterations=6,
-        alpha=0.15,
-        sigma=4.0,
-        sample_per_view=300,
-        growth_radius=2,
-        verbose=True
+        iterations=4,
+        alpha=0.10,
+        sigma=3.0,
+        sample_per_view=80,
+        growth_radius=1,
+        max_ray_samples=8,
+        save_debug_masks=False,
+        verbose=True,
+        num_workers=4,
     )
 
     # save optimized silhouettes for debug
@@ -164,7 +129,13 @@ def main():
     sources = optimized_sources
 
     # 1) Conservative hull
-    hull = compute_shadow_hull(sources, voxel_centers)
+    hull = compute_shadow_hull(
+        optimized_sources,
+        voxel_centers,
+        enforce_connectivity=True,
+        min_component_size=3,
+        verbose=True,
+    )
     print("[PIPELINE] initial hull voxel count:", int(hull.sum()))
     print("[PIPELINE] initial hull occupancy ratio:", float(hull.mean()))
 
@@ -187,7 +158,7 @@ def main():
     except Exception as e:
         print("[ERROR] Raw hull export failed:", e)
 
-    # 2) material optimization by greedy carving only if flag is true
+    # 2) Material optimization only if flag is true
     if optimize_material:
         carved, carve_stats = carve_hollow_shell_strict(
             hull,
@@ -220,14 +191,6 @@ def main():
         # save slices to confirm optimization
         save_voxel_slices(hull, "outputs/debug/slices", "hull")
         save_voxel_slices(carved, "outputs/debug/slices", "carved")
-
-        # export carved mesh
-        try:
-            export_voxels_to_stl(carved, pitch, "outputs/meshes/shadow_carved.stl")
-            print("[PIPELINE] saved carved mesh: outputs/meshes/shadow_carved.stl")
-        except Exception as e:
-            print("[ERROR] carved export failed:", e)
-
 
 if __name__ == "__main__":
     main()
