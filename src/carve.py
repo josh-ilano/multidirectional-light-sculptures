@@ -47,16 +47,11 @@ def initialize_support_counts(projections, sources):
     return counts
 
 
-def compute_protected_shell(original_voxels, shell_thickness_voxels=3, protect_endcaps=True):
-    """
-    Protected shell is defined ONCE from the original hull.
-    Voxels within shell_thickness of the original outside are protected forever.
-    """
+def compute_protected_shell(original_voxels, shell_thickness_voxels=2, protect_endcaps=True):
     dist_inside = distance_transform_edt(original_voxels)
     protected = original_voxels & (dist_inside <= shell_thickness_voxels)
 
     if protect_endcaps:
-        # also preserve occupied voxels lying on the occupied bounding-box faces
         coords = np.argwhere(original_voxels)
         if len(coords) > 0:
             mins = coords.min(axis=0)
@@ -75,13 +70,10 @@ def compute_protected_shell(original_voxels, shell_thickness_voxels=3, protect_e
 
             protected |= endcaps
 
-    return protected
+    return protected, dist_inside
 
 
 def remove_small_components(voxels, min_component_size=100):
-    """
-    Remove tiny disconnected crumbs.
-    """
     structure = np.ones((3, 3, 3), dtype=np.uint8)
     labeled, ncomp = label(voxels, structure=structure)
 
@@ -98,31 +90,72 @@ def remove_small_components(voxels, min_component_size=100):
     return keep
 
 
+def compute_candidate_priority(
+    candidate_indices,
+    occupied_coords,
+    projections,
+    sources,
+    counts,
+    dist_inside,
+):
+    """
+    Higher score => more removable.
+    Prefer:
+    - deeper interior voxels
+    - voxels whose supported pixels have higher redundancy
+    """
+    scores = np.full(len(candidate_indices), -1e18, dtype=float)
+
+    for ii, idx in enumerate(candidate_indices):
+        x, y, z = occupied_coords[idx]
+
+        if dist_inside[x, y, z] <= 0:
+            continue
+
+        redundancy_sum = 0.0
+        valid_views = 0
+        removable = True
+
+        for proj, src, c in zip(projections, sources, counts):
+            if not proj["valid"][idx]:
+                removable = False
+                break
+
+            xpix = proj["px"][idx]
+            ypix = proj["py"][idx]
+
+            if src.image[ypix, xpix]:
+                support = c[ypix, xpix]
+                if support <= 1:
+                    removable = False
+                    break
+                redundancy_sum += float(support - 1)
+            valid_views += 1
+
+        if removable and valid_views > 0:
+            interior_bonus = float(dist_inside[x, y, z])
+            scores[ii] = 2.0 * interior_bonus + 1.0 * redundancy_sum
+
+    return scores
+
+
 def carve_hollow_shell_strict(
     voxels,
     voxel_centers,
     sources,
-    shell_thickness_voxels=3,
-    max_passes=10,
+    shell_thickness_voxels=2,
+    max_passes=4,
     random_seed=0,
     protect_endcaps=True,
     cleanup_components=True,
     min_component_size=100,
     verbose=True
 ):
-    """
-    Hollow the sculpture while preserving:
-      - original exterior shell
-      - optional original endcaps
-      - all required target-shadow pixels
-
-    Only voxels NOT in the protected shell are candidates for removal.
-    """
     rng = np.random.default_rng(random_seed)
     original = voxels.copy()
     carved = voxels.copy()
 
-    protected_shell = compute_protected_shell(
+    protected_shell, dist_inside = compute_protected_shell(
         original,
         shell_thickness_voxels=shell_thickness_voxels,
         protect_endcaps=protect_endcaps
@@ -138,10 +171,7 @@ def carve_hollow_shell_strict(
     occupied_coords, projections = precompute_voxel_projections(original, voxel_centers, sources)
     counts = initialize_support_counts(projections, sources)
 
-    # active tracks which of the original occupied voxels remain
     active = np.ones(len(occupied_coords), dtype=bool)
-
-    # immediately mark non-original-empty only
     for idx, (x, y, z) in enumerate(occupied_coords):
         if not carved[x, y, z]:
             active[idx] = False
@@ -154,7 +184,6 @@ def carve_hollow_shell_strict(
         stats["passes"] += 1
         removed_this_pass = 0
 
-        # candidates are active voxels not in protected shell
         candidate_indices = []
         for idx, (x, y, z) in enumerate(occupied_coords):
             if not active[idx]:
@@ -167,10 +196,32 @@ def carve_hollow_shell_strict(
 
         if len(candidate_indices) == 0:
             if verbose:
-                print(f"[CARVE] pass {p+1}: no hollowing candidates left")
+                print(f"[CARVE] pass {p+1}: no candidates left")
             break
 
-        rng.shuffle(candidate_indices)
+        # compute priority instead of random order
+        scores = compute_candidate_priority(
+            candidate_indices,
+            occupied_coords,
+            projections,
+            sources,
+            counts,
+            dist_inside,
+        )
+
+        valid_mask = scores > -1e17
+        candidate_indices = candidate_indices[valid_mask]
+        scores = scores[valid_mask]
+
+        if len(candidate_indices) == 0:
+            if verbose:
+                print(f"[CARVE] pass {p+1}: no removable candidates")
+            break
+
+        # tie-break slightly with random noise
+        scores = scores + 1e-6 * rng.standard_normal(len(scores))
+        order = np.argsort(-scores)
+        candidate_indices = candidate_indices[order]
 
         pbar = tqdm(
             candidate_indices,
@@ -184,7 +235,6 @@ def carve_hollow_shell_strict(
                 continue
 
             x, y, z = occupied_coords[idx]
-
             if protected_shell[x, y, z]:
                 continue
 
@@ -225,7 +275,7 @@ def carve_hollow_shell_strict(
 
         if removed_this_pass == 0:
             if verbose:
-                print(f"[CARVE] pass {p+1}: no more removable interior voxels")
+                print(f"[CARVE] pass {p+1}: no more removable voxels")
             break
 
     if cleanup_components:
@@ -233,7 +283,7 @@ def carve_hollow_shell_strict(
         carved = remove_small_components(carved, min_component_size=min_component_size)
         after_cleanup = int(carved.sum())
         if verbose and before_cleanup != after_cleanup:
-            print(f"[CARVE] removed {before_cleanup - after_cleanup} voxels from tiny residual components")
+            print(f"[CARVE] removed {before_cleanup - after_cleanup} voxels from tiny components")
 
     stats["end_voxels"] = int(carved.sum())
     stats["reduction_ratio"] = (
