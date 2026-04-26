@@ -112,43 +112,39 @@ def build_sources(images, world_size):
     return sources
 
 
-def main():
-    # parse command line args
-    args = parse_args()
-
-    # world and image parameters
-    world_size = args.world_size
-    nx = ny = nz = args.grid
-    image_size = (args.image_size, args.image_size)
-    optimize_material = args.optimize_material
-
+def run_pipeline(
+    view_paths,
+    world_size=1.0,
+    grid=350,
+    image_size_value=350,
+    optimize_material=False,
+    log=print,
+):
     t0 = time.time()
 
-    # reset the output directory for new run
     reset_output_dirs()
 
-    # load silhouettes from command line
+    nx = ny = nz = grid
+    image_size = (image_size_value, image_size_value)
+
     images = []
-    for i, path in enumerate(args.views):
+    for i, path in enumerate(view_paths):
         img = load_binary_image(path, size=image_size)
         images.append(img)
-        print(f"[PIPELINE] img{i} silhouette pixels:", img.sum(), "of", img.size)
+        log(f"[PIPELINE] img{i} silhouette pixels: {img.sum()} of {img.size}")
 
-    # save the masks to debug folder
     for i, img in enumerate(images):
         save_mask(img, f"outputs/debug/masks/base/view{i}_mask.png")
 
-    # define the shadow sources, one per image
     sources = build_sources(images, world_size)
     original_sources = sources
 
-    # print the shadow sources for debug
     for i, src in enumerate(sources):
-        print(f"[PIPELINE] shadow source {i}: direction={src.direction}, up={src.up}")
+        log(f"[PIPELINE] shadow source {i}: direction={src.direction}, up={src.up}")
 
     voxel_centers = make_voxel_centers(nx, ny, nz, world_size)
 
-    # optimize silhouettes to allow arbitrary silhouette inputs
+    log("[PIPELINE] optimizing silhouettes...")
     optimized_sources = optimize_silhouettes(
         sources,
         voxel_centers,
@@ -157,22 +153,21 @@ def main():
         sigma=4.0,
         sample_per_view=300,
         growth_radius=2,
-        verbose=True
+        verbose=True,
     )
 
-    # save optimized silhouettes for debug
     for i, src in enumerate(optimized_sources):
         save_mask(src.image, f"outputs/debug/masks/opt/view{i}_optimized_mask.png")
 
-    # use optimized silhouettes for hull construction
     sources = optimized_sources
 
-    # 1) Conservative hull
+    log("[PIPELINE] computing shadow hull...")
     hull = compute_shadow_hull(sources, voxel_centers)
-    print("[PIPELINE] initial hull voxel count:", int(hull.sum()))
-    print("[PIPELINE] initial hull occupancy ratio:", float(hull.mean()))
 
-    # 1.5) strict connected pruning
+    log(f"[PIPELINE] initial hull voxel count: {int(hull.sum())}")
+    log(f"[PIPELINE] initial hull occupancy ratio: {float(hull.mean())}")
+
+    log("[PIPELINE] pruning hull...")
     hull, post_stats = fast_projection_prune(
         hull,
         voxel_centers,
@@ -186,31 +181,31 @@ def main():
         verbose=True,
     )
 
-    print("[PIPELINE] fast prune bulk removed:", post_stats["bulk_removed"])
-    print("[PIPELINE] fast prune cc removed:", post_stats["cc_removed"])
-    print("[PIPELINE] fast prune final hull voxel count:", post_stats["final_voxels"])
+    log(f"[PIPELINE] fast prune bulk removed: {post_stats['bulk_removed']}")
+    log(f"[PIPELINE] fast prune cc removed: {post_stats['cc_removed']}")
+    log(f"[PIPELINE] fast prune final hull voxel count: {post_stats['final_voxels']}")
 
-    # simulate the shadows and save to debug
+    log("[PIPELINE] simulating shadows...")
     hull_summaries = simulate_and_save(
         hull,
         voxel_centers,
         sources,
         out_dir="outputs/sim",
-        prefix="hull"
+        prefix="hull",
     )
-    print_view_metrics("Hull shadow simulation", hull_summaries)
 
-    # export raw hull mesh as stl
     pitch = voxel_pitch(world_size, nx, ny, nz)
 
-    try:
-        export_voxels_to_stl(hull, pitch, "outputs/meshes/shadow_hull.stl")
-        print("[PIPELINE] saved raw hull mesh: outputs/meshes/shadow_hull.stl")
-    except Exception as e:
-        print("[ERROR] Raw hull export failed:", e)
+    hull_stl_path = "outputs/meshes/shadow_hull.stl"
 
-    # 2) material optimization by greedy carving only if flag is true
+    log("[PIPELINE] exporting STL...")
+    export_voxels_to_stl(hull, pitch, hull_stl_path)
+    log(f"[PIPELINE] saved raw hull mesh: {hull_stl_path}")
+
+    carved_stl_path = None
+
     if optimize_material:
+        log("[PIPELINE] carving material...")
         carved, carve_stats = carve_hollow_shell_strict(
             hull,
             voxel_centers,
@@ -221,36 +216,48 @@ def main():
             protect_endcaps=True,
             cleanup_components=True,
             min_component_size=150,
-            verbose=True
+            verbose=True,
         )
 
-        print("[PIPELINE] carved sculpture voxels:", int(carved.sum()))
-        print("[PIPELINE] carved sculpture occupancy ratio:", float(carved.mean()))
-        print("[PIPELINE] carved sculpture voxels removed:", carve_stats["removed"])
-        print("[PIPELINE] carved sculpture reduction ratio:", carve_stats["reduction_ratio"])
+        log(f"[PIPELINE] carved sculpture voxels: {int(carved.sum())}")
+        log(f"[PIPELINE] carved sculpture occupancy ratio: {float(carved.mean())}")
+        log(f"[PIPELINE] carved sculpture voxels removed: {carve_stats['removed']}")
+        log(f"[PIPELINE] carved sculpture reduction ratio: {carve_stats['reduction_ratio']}")
 
-        # simulate the shadows of the carved sculpture and save
-        carved_summaries = simulate_and_save(
+        simulate_and_save(
             carved,
             voxel_centers,
             sources,
             out_dir="outputs/sim",
-            prefix="carved"
+            prefix="carved",
         )
-        print_view_metrics("Carved shadow simulation", carved_summaries)
 
-        # save slices to confirm optimization
         save_voxel_slices(hull, "outputs/debug/slices", "hull")
         save_voxel_slices(carved, "outputs/debug/slices", "carved")
 
-        # export carved mesh
-        try:
-            export_voxels_to_stl(carved, pitch, "outputs/meshes/shadow_carved.stl")
-            print("[PIPELINE] saved carved mesh: outputs/meshes/shadow_carved.stl")
-        except Exception as e:
-            print("[ERROR] carved export failed:", e)
+        carved_stl_path = "outputs/meshes/shadow_carved.stl"
+        export_voxels_to_stl(carved, pitch, carved_stl_path)
+        log(f"[PIPELINE] saved carved mesh: {carved_stl_path}")
 
-    print(f"[PIPELINE] completed in {time.time() - t0} seconds")
+    log(f"[PIPELINE] completed in {time.time() - t0:.2f} seconds")
+
+    return {
+        "hull_stl_path": hull_stl_path,
+        "carved_stl_path": carved_stl_path,
+        "hull_summaries": hull_summaries,
+    }
+
+
+def main():
+    args = parse_args()
+
+    run_pipeline(
+        view_paths=args.views,
+        world_size=args.world_size,
+        grid=args.grid,
+        image_size_value=args.image_size,
+        optimize_material=args.optimize_material,
+    )
 
 
 if __name__ == "__main__":
