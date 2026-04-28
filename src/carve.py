@@ -1,5 +1,4 @@
 import numpy as np
-from tqdm import tqdm
 from scipy.ndimage import distance_transform_edt, label
 from projections import project_points_orthographic
 
@@ -47,7 +46,7 @@ def initialize_support_counts(projections, sources):
     return counts
 
 
-def compute_protected_shell(original_voxels, shell_thickness_voxels=2, protect_endcaps=True):
+def compute_protected_shell(original_voxels, shell_thickness_voxels=3, protect_endcaps=True):
     dist_inside = distance_transform_edt(original_voxels)
     protected = original_voxels & (dist_inside <= shell_thickness_voxels)
 
@@ -172,13 +171,13 @@ def carve_hollow_shell_strict(
     counts = initialize_support_counts(projections, sources)
 
     active = np.ones(len(occupied_coords), dtype=bool)
+
     for idx, (x, y, z) in enumerate(occupied_coords):
         if not carved[x, y, z]:
             active[idx] = False
 
     if verbose:
-        print(f"[CARVE] start voxels: {stats['start_voxels']}")
-        print(f"[CARVE] shell thickness (voxels): {shell_thickness_voxels}")
+        print(f"[HOLLOW] start voxels: {stats['start_voxels']}")
 
     for p in range(max_passes):
         stats["passes"] += 1
@@ -196,26 +195,7 @@ def carve_hollow_shell_strict(
 
         if len(candidate_indices) == 0:
             if verbose:
-                print(f"[CARVE] pass {p+1}: no candidates left")
-            break
-
-        # compute priority instead of random order
-        scores = compute_candidate_priority(
-            candidate_indices,
-            occupied_coords,
-            projections,
-            sources,
-            counts,
-            dist_inside,
-        )
-
-        valid_mask = scores > -1e17
-        candidate_indices = candidate_indices[valid_mask]
-        scores = scores[valid_mask]
-
-        if len(candidate_indices) == 0:
-            if verbose:
-                print(f"[CARVE] pass {p+1}: no removable candidates")
+                print(f"[HOLLOW] pass {p+1}: no hollowing candidates left")
             break
 
         # tie-break slightly with random noise
@@ -223,14 +203,7 @@ def carve_hollow_shell_strict(
         order = np.argsort(-scores)
         candidate_indices = candidate_indices[order]
 
-        pbar = tqdm(
-            candidate_indices,
-            desc=f"Hollow pass {p+1}",
-            unit="vox",
-            disable=not verbose
-        )
-
-        for idx in pbar:
+        for idx in candidate_indices:
             if not active[idx]:
                 continue
 
@@ -264,18 +237,7 @@ def carve_hollow_shell_strict(
                         ypix = proj["py"][idx]
                         c[ypix, xpix] -= 1
 
-            if verbose:
-                pbar.set_postfix(
-                    removed=removed_this_pass,
-                    remaining=int(active.sum())
-                )
-
-        if verbose:
-            print(f"[CARVE] pass {p+1}: removed {removed_this_pass}, remaining {int(carved.sum())}")
-
         if removed_this_pass == 0:
-            if verbose:
-                print(f"[CARVE] pass {p+1}: no more removable voxels")
             break
 
     if cleanup_components:
@@ -283,7 +245,7 @@ def carve_hollow_shell_strict(
         carved = remove_small_components(carved, min_component_size=min_component_size)
         after_cleanup = int(carved.sum())
         if verbose and before_cleanup != after_cleanup:
-            print(f"[CARVE] removed {before_cleanup - after_cleanup} voxels from tiny components")
+            print(f"[HOLLOW] removed {before_cleanup - after_cleanup} voxels")
 
     stats["end_voxels"] = int(carved.sum())
     stats["reduction_ratio"] = (

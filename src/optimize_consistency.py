@@ -1,7 +1,5 @@
 import os
 import numpy as np
-from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor
 from scipy.ndimage import binary_erosion, binary_dilation, binary_closing
 
 from shadow_hull import compute_raw_shadow_hull
@@ -9,7 +7,6 @@ from render import render_shadow
 from projections import project_points_orthographic
 from warp import smooth_displacement, warp_mask
 from distances import outside_distance
-from image_io import save_mask
 
 
 def inconsistent_pixels(desired: np.ndarray, actual: np.ndarray) -> np.ndarray:
@@ -206,14 +203,27 @@ def _build_constraints_for_view(
             max_ray_samples=max_ray_samples,
         )
 
-        if result is None:
-            continue
+        candidate_ids = np.arange(len(xs))
 
-        point_idx, _ = result
+        if len(candidate_ids) > sample_per_view:
+            candidate_ids = np.random.choice(
+                candidate_ids,
+                size=sample_per_view,
+                replace=False,
+            )
 
-        for k, src in enumerate(sources):
-            if k == j:
-                continue
+        for count, t in enumerate(candidate_ids, start=1):
+            px = int(xs[t])
+            py = int(ys[t])
+
+            result = find_least_cost_voxel_for_inconsistent_pixel_fast(
+                source_index=j,
+                pixel_xy=(px, py),
+                sources=sources,
+                outside_cost_maps=outside_cost_maps,
+                proj_data=proj_data,
+                max_ray_samples=max_ray_samples,
+            )
 
             q = project_point_to_image_fast(point_idx, src, proj_data[k])
             if q is None:
@@ -259,46 +269,12 @@ def build_displacement_constraints(
             sources
         ))
 
-    actuals = [x[0] for x in precomputed]
-    inconsistencies = [x[1] for x in precomputed]
-    outside_cost_maps = [x[2] for x in precomputed]
-    boundary_pts_list = [x[3] for x in precomputed]
-
-    dx_list = [np.zeros_like(s.image, dtype=float) for s in sources]
-    dy_list = [np.zeros_like(s.image, dtype=float) for s in sources]
-    add_maps = [np.zeros_like(s.image, dtype=bool) for s in sources]
-
-    _, proj_data = precompute_source_projection_data(
-        sources,
-        voxel_centers,
-        num_workers=num_workers
-    )
-
-    total_missing = sum(int(inc.sum()) for inc in inconsistencies)
-
-    jobs = [
-        (
-            j,
-            inconsistencies[j],
-            sample_per_view,
-            max_ray_samples,
-            sources,
-            outside_cost_maps,
-            boundary_pts_list,
-            proj_data,
-            verbose
-        )
-        for j in range(len(sources))
-    ]
-
-    with ThreadPoolExecutor(max_workers=num_workers) as ex:
-        results = list(ex.map(lambda args: _build_constraints_for_view(*args), jobs))
-
-    for _, local_dx_list, local_dy_list, local_add_maps, _ in results:
-        for k in range(len(sources)):
-            dx_list[k] += local_dx_list[k]
-            dy_list[k] += local_dy_list[k]
-            add_maps[k] |= local_add_maps[k]
+                # smooth boundary pull
+                b = nearest_boundary_point_from_list(boundary_pts_list[k], q)
+                if b is not None:
+                    bx, by = int(b[0]), int(b[1])
+                    dx_list[k][by, bx] += (qx - bx)
+                    dy_list[k][by, bx] += (qy - by)
 
     stats = {
         "total_missing": int(total_missing),
@@ -367,13 +343,20 @@ def optimize_silhouettes(
     plateau_patience=2,
     fallback_growth_threshold=5,
     fallback_global_dilation=True,
-    save_debug_masks=True,
-    verbose=True,
-    num_workers=None,
+    verbose=True
 ):
     """
     Iteratively deform silhouettes to reduce inconsistency.
-    Same algorithm, but parallelized where the work is naturally independent.
+
+    Strategy:
+    - build hull from current silhouettes
+    - detect missing pixels
+    - infer target growth locations in the other silhouettes
+    - combine:
+        - smooth warp from sparse displacement field
+        - discrete growth from add_maps
+        - fallback dilation when progress stalls or growth is too weak
+    - keep best result and early stop on plateau
     """
     current_sources = list(sources)
     best_sources = list(sources)
@@ -389,7 +372,7 @@ def optimize_silhouettes(
 
     for it in range(iterations):
         if verbose:
-            print(f"\n[SILHOUETTE OPTIMIZER] iteration {it+1}/{iterations}")
+            print(f"\n[OPTIMIZER] iteration {it+1}/{iterations}")
 
         dx_list, dy_list, add_maps, actuals, inconsistencies, stats = build_displacement_constraints(
             current_sources,
@@ -406,8 +389,8 @@ def optimize_silhouettes(
         worst_view = int(np.argmax(missing_per_view)) if len(missing_per_view) > 0 else 0
 
         if verbose:
-            print(f"[SILHOUETTE OPTIMIZER] growth pixels per view: {growth_pixels_per_view}")
-            print(f"[SILHOUETTE OPTIMIZER] iter {it+1}: missing={total_missing}, per_view={missing_per_view}")
+            print(f"[OPTIMIZER] growth pixels per view: {growth_pixels_per_view}")
+            print(f"[OPTIMIZER] iter {it+1}: missing={total_missing}, per_view={missing_per_view}")
 
         if total_missing < best_missing:
             best_missing = total_missing
@@ -418,7 +401,7 @@ def optimize_silhouettes(
 
         if total_missing == 0:
             if verbose:
-                print("[SILHOUETTE OPTIMIZER] perfect consistency reached")
+                print("[OPTIMIZER] perfect consistency reached")
             break
 
         jobs = [
@@ -447,19 +430,12 @@ def optimize_silhouettes(
 
         current_sources = updated_sources
 
-        if save_debug_masks:
-            for idx, s in enumerate(current_sources):
-                save_mask(s.image, f"outputs/debug/opt_iterations/opt_iter_{it+1}_view{idx}.png")
-                save_mask(actuals[idx], f"outputs/debug/opt_iterations/opt_iter_{it+1}_view{idx}_actual.png")
-                save_mask(inconsistencies[idx], f"outputs/debug/opt_iterations/opt_iter_{it+1}_view{idx}_missing.png")
-                save_mask(add_maps[idx], f"outputs/debug/opt_iterations/opt_iter_{it+1}_view{idx}_growth.png")
-
         if stall_count >= plateau_patience:
             if verbose:
-                print("[SILHOUETTE OPTIMIZER] early stop: no improvement")
+                print("[OPTIMIZER] early stop: no improvement")
             break
 
     if verbose:
-        print(f"[SILHOUETTE OPTIMIZER] best total missing: {best_missing}")
+        print(f"[OPTIMIZER] best total missing: {best_missing}")
 
     return best_sources
