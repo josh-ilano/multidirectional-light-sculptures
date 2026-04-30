@@ -35,43 +35,35 @@ class StreamlitLogCapture:
         if self.buffer.strip():
             self.log_func(self.buffer.strip())
             self.buffer = ""
-
+            
 def show_stl_preview(stl_path, sim_dir=None, width=420):
-    from render_preview import render_shadow_preview_threejs
+    import re
+    import streamlit as st
     import streamlit.components.v1 as components
     from pathlib import Path
-    import re
+    from render_preview import render_shadow_preview_threejs
 
     preview_path = str(Path(stl_path).with_name("shadow_preview.png"))
-
-    # (Optional) keep shadow image logic for future use, but not needed for Three.js yet
-    shadow_images = []
-    if sim_dir and Path(sim_dir).exists():
-        sim_images = sorted(Path(sim_dir).glob("*.png"))
-        view_map = {}
-
-        for img in sim_images:
-            match = re.search(r"view[_-]?(\d+)", img.name.lower())
-            if match:
-                v = int(match.group(1))
-                if v not in view_map:
-                    view_map[v] = img
-
-        shadow_images = [view_map.get(i) for i in range(3)]
-
-
     html_path = render_shadow_preview_threejs(
         stl_path=stl_path,
         output_path=preview_path,
     )
 
+    # Read and inline — but raise the height and explicitly allow scrolling=False
     with open(html_path, "r") as f:
         html = f.read()
 
-    components.html(html, height=650)
+    # Streamlit components.html has an undocumented ~4MB limit on the html arg.
+    # If the embedded GLB pushes past that, serve via a file:// workaround instead.
+    MAX_INLINE_BYTES = 3_500_000
+    if len(html.encode()) > MAX_INLINE_BYTES:
+        st.warning(
+            f"Model is large ({len(html.encode())//1024} KB). "
+            "If the preview is blank, try reducing grid resolution."
+        )
 
+    components.html(html, height=650, scrolling=False)
     return html_path
-
 
 def show_shadow_stats(hull_summaries):
     if not hull_summaries:
