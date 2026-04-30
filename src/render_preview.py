@@ -23,31 +23,17 @@ def render_shadow_preview_threejs(stl_path, output_path):
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Shadow Box Preview</title>
+  <title>Shadow Preview</title>
   <style>
-    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-    body {{
+    html, body {{
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
       background: #0d0b10;
-      display: flex; align-items: center; justify-content: center;
-      height: 100vh; overflow: hidden;
-      font-family: 'Courier New', monospace;
-    }}
-    #info {{
-      position: absolute; top: 18px; left: 50%; transform: translateX(-50%);
-      color: #6677aa; font-size: 10px; letter-spacing: 0.18em;
-      text-transform: uppercase; pointer-events: none;
-    }}
-    #status {{
-      position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%);
-      color: #ff6655; font-size: 10px; letter-spacing: 0.1em;
-      pointer-events: none; opacity: 0; transition: opacity 0.3s;
     }}
   </style>
 </head>
 <body>
-  <div id="info">drag to rotate &nbsp;·&nbsp; scroll to zoom</div>
-  <div id="status"></div>
-
 <script type="module">
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160/build/three.module.js';
 import {{ OrbitControls }} from 'https://cdn.jsdelivr.net/npm/three@0.160/examples/jsm/controls/OrbitControls.js';
@@ -74,8 +60,6 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.1;
 document.body.appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -86,44 +70,21 @@ controls.maxDistance = 6.0;
 controls.maxPolarAngle = Math.PI * 0.75;
 controls.update();
 
-const S = 0.75;
-
-const wallMat = new THREE.MeshStandardMaterial({{
-  color: 0xc4a06a,
-  roughness: 0.88,
-  metalness: 0.0,
-  side: THREE.FrontSide,
-}});
-
-function addWall(w, h, px, py, pz, rx, ry) {{
-  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), wallMat);
-  mesh.position.set(px, py, pz);
-  mesh.rotation.set(rx, ry, 0);
-  mesh.receiveShadow = true;
-  scene.add(mesh);
-}}
-
-addWall(S * 2, S * 2,   0, -S,  0, -Math.PI / 2, 0);
-addWall(S * 2, S * 2,   0,  0, -S, 0, 0);
-addWall(S * 2, S * 2,  -S,  0,  0, 0, Math.PI / 2);
-
 const blueLight = new THREE.PointLight(0x5a6eff, 7.5, 4.5, 2);
-blueLight.position.set(-S + 0.08, 0.08, 0.12);
+blueLight.position.set(-0.8, 0.9, 0.5);
 blueLight.castShadow = true;
 blueLight.shadow.mapSize.set(2048, 2048);
 blueLight.shadow.camera.near = 0.02;
-blueLight.shadow.camera.far  = 5.0;
-blueLight.shadow.radius = 3.5;
+blueLight.shadow.camera.far = 10.0;
 scene.add(blueLight);
 
-const topSpot = new THREE.SpotLight(0xffd580, 6.0, 4.0, 0.36, 0.5, 1.8);
-topSpot.position.set(0.0, S - 0.05, -0.08);
-topSpot.target.position.set(0, -S, 0);
+const topSpot = new THREE.SpotLight(0xffd580, 5.5, 10.0, 0.45, 0.5, 1.8);
+topSpot.position.set(0.0, 1.6, 0.1);
+topSpot.target.position.set(0, 0, 0);
 topSpot.castShadow = true;
 topSpot.shadow.mapSize.set(2048, 2048);
 topSpot.shadow.camera.near = 0.05;
-topSpot.shadow.camera.far  = 4.0;
-topSpot.shadow.radius = 2.5;
+topSpot.shadow.camera.far = 10.0;
 scene.add(topSpot);
 scene.add(topSpot.target);
 
@@ -136,24 +97,19 @@ fillLight.shadow.camera.right = 1.0;
 fillLight.shadow.camera.top = 1.0;
 fillLight.shadow.camera.bottom = -1.0;
 fillLight.shadow.camera.near = 0.2;
-fillLight.shadow.camera.far  = 5.0;
-fillLight.shadow.radius = 2.5;
+fillLight.shadow.camera.far = 10.0;
 scene.add(fillLight);
 
-const ambient = new THREE.AmbientLight(0x404050, 1.8);
+const ambient = new THREE.AmbientLight(0x404050, 1.5);
 scene.add(ambient);
 
 const loader = new GLTFLoader();
 const glbData = "data:model/gltf-binary;base64,{glb_base64}";
-const statusEl = document.getElementById('status');
-
 loader.load(
   glbData,
   (gltf) => {{
     const obj = gltf.scene;
     const bbox = new THREE.Box3().setFromObject(obj);
-    const ctr = new THREE.Vector3();
-    bbox.getCenter(ctr);
     const size = new THREE.Vector3();
     bbox.getSize(size);
     const maxExt = Math.max(size.x, size.y, size.z);
@@ -166,7 +122,7 @@ loader.load(
     const ctr2 = new THREE.Vector3();
     bbox2.getCenter(ctr2);
     obj.position.sub(ctr2);
-    obj.position.y += 0.02;
+    obj.position.y += 0.01;
 
     obj.traverse((child) => {{
       if (!child.isMesh) return;
@@ -180,32 +136,10 @@ loader.load(
     }});
 
     scene.add(obj);
-
-    const bbox3 = new THREE.Box3().setFromObject(obj);
-    const objTopY = bbox3.max.y + obj.position.y;
-    const ceilY = S - 0.01;
-
-    const wireMat = new THREE.LineBasicMaterial({{
-      color: 0xdddddd,
-      opacity: 0.45,
-      transparent: true,
-    }});
-    const wireOffsets = [[-0.18,-0.18],[0.18,-0.18],[-0.18,0.18],[0.18,0.18]];
-    wireOffsets.forEach(([wx, wz]) => {{
-      const pts = [
-        new THREE.Vector3(wx * 0.7, objTopY, wz * 0.7),
-        new THREE.Vector3(wx * 1.0, ceilY, wz * 1.0),
-      ];
-      scene.add(new THREE.Line(
-        new THREE.BufferGeometry().setFromPoints(pts), wireMat
-      ));
-    }});
   }},
   undefined,
   (err) => {{
     console.error('GLTFLoader error:', err);
-    statusEl.textContent = 'Model load error — check console';
-    statusEl.style.opacity = '1';
   }}
 );
 
