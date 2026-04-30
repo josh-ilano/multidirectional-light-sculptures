@@ -2,14 +2,17 @@ import os
 os.environ["PYVISTA_OFF_SCREEN"] = "true"
 
 import tempfile
+from io import BytesIO
 from pathlib import Path
 import streamlit as st
 from run_pipeline import run_pipeline
 from render_preview import render_shadow_preview
+from phylopic_api import PhyloPicClient, PhyloPicImage
 import numpy as np
 import contextlib
 from PIL import Image
 import re
+from streamlit_searchbox import st_searchbox
 
 
 class StreamlitLogCapture:
@@ -99,6 +102,246 @@ def preview_uploaded_image_return(uploaded_file, image_size=250, threshold=128, 
 
     preview_arr = np.where(mask, 0, 255).astype(np.uint8)
     return Image.fromarray(preview_arr, mode="L")
+
+
+@st.cache_resource
+def get_phylopic_client():
+    return PhyloPicClient()
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def search_phylopic_image_dicts(query, limit=12):
+    return [
+        image.__dict__
+        for image in get_phylopic_client().search_images(query, limit=limit)
+    ]
+
+
+@st.cache_data(show_spinner=False)
+def download_phylopic_image(uuid, title, page_url, preview_url, download_url, license_url, contributor):
+    image = PhyloPicImage(
+        uuid=uuid,
+        title=title,
+        page_url=page_url,
+        preview_url=preview_url,
+        download_url=download_url,
+        license_url=license_url,
+        contributor=contributor,
+    )
+    return get_phylopic_client().download_image(image)
+
+
+def make_uploaded_selection(uploaded_file):
+    return {
+        "name": uploaded_file.name,
+        "source": "Upload",
+        "bytes": uploaded_file.getbuffer(),
+        "caption": uploaded_file.name,
+    }
+
+
+def make_phylopic_selection(image, image_bytes):
+    return {
+        "name": f"phylopic_{image.uuid}.png",
+        "source": "PhyloPic",
+        "bytes": image_bytes,
+        "caption": image.title,
+        "details": image,
+    }
+
+
+def preview_selection(selection, image_size):
+    return preview_uploaded_image_return(
+        BytesIO(bytes(selection["bytes"])),
+        image_size=image_size,
+    )
+
+
+def preview_phylopic_result(image, image_size):
+    image_bytes = download_phylopic_image(
+        image.uuid,
+        image.title,
+        image.page_url,
+        image.preview_url,
+        image.download_url,
+        image.license_url,
+        image.contributor,
+    )
+    return preview_selection(make_phylopic_selection(image, image_bytes), image_size)
+
+
+def show_selected_silhouettes(selected_images, image_size):
+    if not selected_images:
+        return
+
+    cols = st.columns(len(selected_images), gap="small")
+    for col, selection in zip(cols, selected_images):
+        with col:
+            st.image(
+                preview_selection(selection, image_size),
+                caption=selection["caption"],
+                width=image_size,
+            )
+
+            details = selection.get("details")
+            if details:
+                meta = []
+                if isinstance(details, dict):
+                    contributor = details.get("contributor")
+                    license_url = details.get("license_url")
+                else:
+                    contributor = details.contributor
+                    license_url = details.license_url
+                if contributor:
+                    meta.append(f"Contributor: {contributor}")
+                if license_url:
+                    meta.append(f"[License]({license_url})")
+                st.caption(" | ".join(meta))
+
+
+def get_phylopic_selected_silhouettes():
+    return st.session_state.setdefault("phylopic_selected_silhouettes", [])
+
+
+def remove_phylopic_selection(uuid):
+    st.session_state["phylopic_selected_silhouettes"] = [
+        selection
+        for selection in get_phylopic_selected_silhouettes()
+        if selection.get("details", {}).get("uuid") != uuid
+    ]
+
+
+def has_phylopic_selection(uuid):
+    return any(
+        selection.get("details", {}).get("uuid") == uuid
+        for selection in get_phylopic_selected_silhouettes()
+    )
+
+
+def search_phylopic_results(query):
+    if not query:
+        return []
+
+    try:
+        return [
+            PhyloPicImage(**image)
+            for image in search_phylopic_image_dicts(query, limit=12)
+        ]
+    except Exception as e:
+        st.error(f"PhyloPic search failed: {e}")
+        return []
+
+
+def add_phylopic_selection(image):
+    selections = get_phylopic_selected_silhouettes()
+
+    if len(selections) >= 3:
+        st.error("Please remove a selected silhouette before adding another.")
+        return
+    if has_phylopic_selection(image.uuid):
+        return
+
+    try:
+        image_bytes = download_phylopic_image(
+            image.uuid,
+            image.title,
+            image.page_url,
+            image.preview_url,
+            image.download_url,
+            image.license_url,
+            image.contributor,
+        )
+        selection = make_phylopic_selection(image, image_bytes)
+        selection["details"] = image.__dict__
+        selections.append(selection)
+    except Exception as e:
+        st.error(f"Could not download {image.title} from PhyloPic: {e}")
+
+
+def render_phylopic_result_picker(results, image_size):
+    current_count = len(get_phylopic_selected_silhouettes())
+    cols = st.columns(3, gap="small")
+
+    for index, image in enumerate(results):
+        with cols[index % 3]:
+            try:
+                preview = preview_phylopic_result(image, image_size)
+            except Exception:
+                preview = image.preview_url
+            st.image(preview, caption=image.title, width=image_size)
+            already_selected = has_phylopic_selection(image.uuid)
+            disabled = already_selected or current_count >= 3
+            if st.button(
+                "Added" if already_selected else "Add silhouette",
+                key=f"phylopic_add_{image.uuid}",
+                disabled=disabled,
+                type="secondary",
+                use_container_width=True,
+            ):
+                add_phylopic_selection(image)
+                st.rerun()
+
+            if image.contributor:
+                st.caption(f"Contributor: {image.contributor}")
+            if image.license_url:
+                st.caption(f"[License]({image.license_url})")
+
+    if current_count >= 3:
+        st.caption("Remove a selected silhouette to add another.")
+
+
+def render_phylopic_selection_tray(image_size):
+    selections = get_phylopic_selected_silhouettes()
+    if not selections:
+        return
+
+    st.markdown("### Selected silhouettes")
+    cols = st.columns(len(selections), gap="small")
+    for col, selection in zip(cols, selections):
+        details = selection.get("details", {})
+        with col:
+            st.image(
+                preview_selection(selection, image_size),
+                caption=selection["caption"],
+                width=image_size,
+            )
+            if details.get("contributor"):
+                st.caption(f"Contributor: {details['contributor']}")
+            if details.get("license_url"):
+                st.caption(f"[License]({details['license_url']})")
+            if st.button(
+                "Remove",
+                key=f"phylopic_remove_{details.get('uuid', selection['name'])}",
+                use_container_width=True,
+            ):
+                remove_phylopic_selection(details.get("uuid"))
+                st.rerun()
+
+
+def phylopic_search_ui():
+    selected_taxon = st_searchbox(
+        get_phylopic_client().suggest_names,
+        placeholder="Type a few letters, then choose a suggested name",
+        key="phylopic_searchbox",
+    )
+
+    if not selected_taxon:
+        render_phylopic_selection_tray(image_size)
+        return get_phylopic_selected_silhouettes()
+
+    with st.spinner("Searching PhyloPic..."):
+        results = search_phylopic_results(selected_taxon)
+
+    if not results:
+        st.info("No PhyloPic silhouettes found for that search.")
+        render_phylopic_selection_tray(image_size)
+        return get_phylopic_selected_silhouettes()
+
+    st.caption(f"Showing silhouettes for {selected_taxon}.")
+    render_phylopic_result_picker(results, image_size)
+    render_phylopic_selection_tray(image_size)
+
+    return get_phylopic_selected_silhouettes()
 
 
 def render_scrollable_logs(logs):
@@ -204,7 +447,7 @@ def show_results(result, optimize_material):
                         st.image(
                             str(img_path),
                             caption=caption,
-                            width=220,
+                            width=image_size,
                         )
 
     st.divider()
@@ -223,8 +466,11 @@ st.set_page_config(
 st.title("Multidirectional Light Sculpture Generator")
 
 st.write(
-    "Upload 1-3 silhouette images, generate a shadow hull, preview the solid, and download the final STL."
+    "Upload 1-3 silhouette images, generate a shadow hull, preview the solid, and download the final STL. You also have the option of searching through" \
+    " a catalog of over 12,000 silhouettes and choosing three of your preference." \
 )
+
+st.write("Advice: Choose images that are completely dark and are similar in shape to each other in order to yield the best results.")
 
 st.divider()
 
@@ -273,42 +519,47 @@ with st.sidebar:
         help="Removes unnecessary interior voxels to create a hollow structure. Reduces material usage but increases processing time.",
     )
 
-st.subheader("1. Upload silhouettes")
+st.subheader("1. Choose silhouettes")
 
-uploaded_files = st.file_uploader(
-    "Upload 1 to 3 silhouette images",
-    type=["png", "jpg", "jpeg", "webp"],
-    accept_multiple_files=True,
+input_source = st.radio(
+    "Image source",
+    ["Upload files", "Search PhyloPic"],
+    horizontal=True,
 )
 
-if uploaded_files:
-    if len(uploaded_files) > 3:
-        st.error("Please upload at most 3 images.")
-        st.stop()
+selected_images = []
 
-    cols = st.columns(len(uploaded_files), gap="small")
+if input_source == "Upload files":
+    uploaded_files = st.file_uploader(
+        "Upload 1 to 3 silhouette images",
+        type=["png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True,
+    )
 
-    for i, (col, file) in enumerate(zip(cols, uploaded_files)):
-        img = preview_uploaded_image_return(file, image_size=image_size)
+    if uploaded_files:
+        if len(uploaded_files) > 3:
+            st.error("Please upload at most 3 images.")
+            st.stop()
 
-        with col:
-            st.image(
-                img,
-                caption=file.name,
-                width=260,
-            )
+        selected_images = [make_uploaded_selection(file) for file in uploaded_files]
+        show_selected_silhouettes(selected_images, image_size)
+else:
+    selected_images = phylopic_search_ui()
+
+if selected_images:
+    st.caption(f"{len(selected_images)} silhouette(s) selected.")
 
 st.subheader("2. Generate sculpture")
 
 run_clicked = st.button(
     "Generate STL",
     type="primary",
-    disabled=not uploaded_files or len(uploaded_files) > 3,
+    disabled=not selected_images or len(selected_images) > 3,
 )
 
 if run_clicked:
-    if not uploaded_files:
-        st.error("Please upload at least one silhouette image.")
+    if not selected_images:
+        st.error("Please select at least one silhouette image.")
         st.stop()
 
     log_box = st.empty()
@@ -326,12 +577,12 @@ if run_clicked:
     with tempfile.TemporaryDirectory() as tmpdir:
         input_paths = []
 
-        for i, uploaded_file in enumerate(uploaded_files):
-            suffix = Path(uploaded_file.name).suffix or ".png"
+        for i, selected_image in enumerate(selected_images):
+            suffix = Path(selected_image["name"]).suffix or ".png"
             path = os.path.join(tmpdir, f"view_{i}{suffix}")
 
             with open(path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
+                f.write(bytes(selected_image["bytes"]))
 
             input_paths.append(path)
 
