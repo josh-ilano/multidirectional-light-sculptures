@@ -15,17 +15,8 @@ _XVFB_STARTED = False
 
 
 def ensure_headless_display():
-    global _XVFB_STARTED
-
-    if _XVFB_STARTED or sys.platform != "linux":
-        return
-
-    try:
-        pv.start_xvfb(wait=0.5)
-    except Exception:
-        pass
-    finally:
-        _XVFB_STARTED = True
+    # No-op for Streamlit Cloud
+    return
 
 
 def normalize_mesh(mesh: pv.PolyData, target_size: float = 1.6) -> pv.PolyData:
