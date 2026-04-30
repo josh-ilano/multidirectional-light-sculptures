@@ -6,3 +6,4 @@ trimesh
 Pillow
 requests
 pyvista
+skimage
