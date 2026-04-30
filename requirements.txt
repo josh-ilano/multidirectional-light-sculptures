@@ -1,0 +1,8 @@
+streamlit
+streamlit-searchbox
+numpy
+scipy
+trimesh
+Pillow
+requests
+pyvista
