@@ -3,8 +3,11 @@ import argparse
 import tempfile
 from pathlib import Path
 
-os.environ["PYVISTA_USE_OSMESA"] = "true"
+
 os.environ["PYVISTA_OFF_SCREEN"] = "true"
+os.environ["PYVISTA_USE_OSMESA"] = "true"
+os.environ["VTK_DEFAULT_RENDER_WINDOW_OFFSCREEN"] = "1"
+os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
 
 import numpy as np
 from PIL import Image
