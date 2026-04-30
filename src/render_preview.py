@@ -1,17 +1,15 @@
 import os
 import argparse
 import tempfile
-import sys
 from pathlib import Path
 
+os.environ["PYVISTA_USE_OSMESA"] = "true"
 os.environ["PYVISTA_OFF_SCREEN"] = "true"
 
 import numpy as np
 from PIL import Image
 import pyvista as pv
 
-
-_XVFB_STARTED = False
 
 
 def ensure_headless_display():
