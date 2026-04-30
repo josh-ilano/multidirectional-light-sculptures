@@ -55,44 +55,56 @@ def add_wall_border(plotter, wall, color="#333333", line_width=0.035):
     plotter.add_mesh(tubes, color=color, lighting=False)
  
  
-def make_shadow_texture(mask_path: str, output_path: str, threshold: int = 245):
+def make_shadow_texture(mask_path: str, output_path: str, threshold: int = 128):
     img = Image.open(mask_path).convert("RGBA")
     arr = np.array(img)
+
     rgb = arr[:, :, :3]
-    alpha = arr[:, :, 3]
-    luminance = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
-    shadow_mask = (alpha > 0) & (luminance > threshold)
+    luminance = (
+        0.299 * rgb[:, :, 0] +
+        0.587 * rgb[:, :, 1] +
+        0.114 * rgb[:, :, 2]
+    )
+
+    # Dark pixels = the silhouette = the shadow
+    shadow_mask = luminance < threshold
+
     out = np.zeros((arr.shape[0], arr.shape[1], 4), dtype=np.uint8)
-    out[:, :, 3] = shadow_mask.astype(np.uint8) * 255
+    out[:, :, 3] = shadow_mask.astype(np.uint8) * 200  # semi-transparent shadow
+
     Image.fromarray(out).save(output_path)
+
 def render_orthographic_silhouette(mesh: pv.PolyData, direction: str, image_size=(512, 512)) -> str:
-    """Render a binary silhouette of the mesh from an orthographic camera direction."""
+    # Use a fresh normalized copy at origin — before room placement
+    m = normalize_mesh(mesh.copy(), target_size=1.6)
+
     p = pv.Plotter(off_screen=True, window_size=image_size)
     p.set_background("white")
-    p.add_mesh(mesh, color="black", lighting=False)
+    p.add_mesh(m, color="black", lighting=False)
+    p.camera.parallel_projection = True
+    p.camera.parallel_scale = 1.1
 
     if direction == "left":
+        # Looking from -X toward +X (left wall receives this shadow)
         p.camera_position = [(-10, 0, 0), (0, 0, 0), (0, 0, 1)]
     elif direction == "back":
+        # Looking from +Y toward -Y (back wall receives this shadow)
         p.camera_position = [(0, 10, 0), (0, 0, 0), (0, 0, 1)]
     elif direction == "top":
+        # Looking from +Z toward -Z (floor receives this shadow)
         p.camera_position = [(0, 0, 10), (0, 0, 0), (0, 1, 0)]
 
-    p.camera.parallel_projection = True
-    p.camera.parallel_scale = 1.2
     p.enable_anti_aliasing()
-
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         tmp_path = f.name
     p.screenshot(tmp_path)
     p.close()
     return tmp_path
 
-
 def render_shadow_preview(
     stl_path: str,
     output_path: str,
-    shadow_images=None,   # kept for API compat but ignored
+    shadow_images=None,
     window_size=(1200, 900),
 ):
     stl_path = str(stl_path)
@@ -110,13 +122,6 @@ def render_shadow_preview(
     eps = 0.01
     floor_z = -1.2
     wall_center_z = floor_z + wall_height / 2.0
-
-    mesh.translate(
-        (-mesh.center[0], -mesh.center[1], wall_center_z - mesh.center[2]),
-        inplace=True,
-    )
-
-    plotter.add_mesh(mesh, color="#a3a3a3", smooth_shading=True, specular=0.15, diffuse=0.85)
 
     walls = [
         {
@@ -142,6 +147,19 @@ def render_shadow_preview(
         },
     ]
 
+    # Generate silhouettes from origin-centered mesh BEFORE room translation
+    generated_shadows = []
+    for wall_cfg in walls:
+        tmp_silhouette = render_orthographic_silhouette(mesh, wall_cfg["direction"])
+        generated_shadows.append(tmp_silhouette)
+
+    # NOW translate mesh into room position
+    mesh.translate(
+        (-mesh.center[0], -mesh.center[1], wall_center_z - mesh.center[2]),
+        inplace=True,
+    )
+    plotter.add_mesh(mesh, color="#a3a3a3", smooth_shading=True, specular=0.15, diffuse=0.85)
+
     for wall_cfg in walls:
         wall = make_wall(
             center=wall_cfg["center"],
@@ -153,34 +171,27 @@ def render_shadow_preview(
         plotter.add_mesh(wall, color="#d8d8d8", ambient=0.75, diffuse=0.8, show_edges=False)
         add_wall_border(plotter, wall, color="#9D9D9D", line_width=0.015)
 
-    # Generate orthographic silhouettes and project as shadow decals
-    generated_shadows = []
-    for wall_cfg in walls:
-        tmp_silhouette = render_orthographic_silhouette(mesh, wall_cfg["direction"])
-        generated_shadows.append(tmp_silhouette)
-
     with tempfile.TemporaryDirectory() as tmpdir:
         for i, (mask_path, wall_cfg) in enumerate(zip(generated_shadows, walls)):
             shadow_png = Path(tmpdir) / f"shadow_{i}.png"
-            make_shadow_texture(mask_path, shadow_png, threshold=200)
+            make_shadow_texture(mask_path, shadow_png, threshold=128)
 
             decal = make_wall(
                 center=wall_cfg["decal_center"],
                 u_vec=wall_cfg["u"],
                 v_vec=wall_cfg["v"],
-                width=wall_cfg["width"] * 0.6,   # larger since it fills the wall
+                width=wall_cfg["width"] * 0.6,
                 height=wall_cfg["height"] * 0.6,
             )
             plotter.add_mesh(decal, texture=pv.read_texture(str(shadow_png)), lighting=False, show_edges=False)
 
-        plotter.add_light(pv.Light(position=(3, -4, 5), intensity=0.8))
-        plotter.add_light(pv.Light(position=(-4, -3, 3), intensity=0.4))
-        plotter.camera_position = [(6.5, -7.5, 5.0), (0, 0, 0), (0, 0, 1)]
-        plotter.camera.zoom(0.6)
-        plotter.enable_anti_aliasing()
-        plotter.screenshot(output_path)
+    plotter.add_light(pv.Light(position=(3, -4, 5), intensity=0.8))
+    plotter.add_light(pv.Light(position=(-4, -3, 3), intensity=0.4))
+    plotter.camera_position = [(6.5, -7.5, 5.0), (0, 0, 0), (0, 0, 1)]
+    plotter.camera.zoom(0.6)
+    plotter.enable_anti_aliasing()
+    plotter.screenshot(output_path)
 
-    # Cleanup temp silhouette files
     for p in generated_shadows:
         try:
             os.remove(p)
@@ -189,4 +200,3 @@ def render_shadow_preview(
 
     plotter.close()
     return output_path
- 
