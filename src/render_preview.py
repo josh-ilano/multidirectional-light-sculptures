@@ -65,65 +65,83 @@ def make_shadow_texture(mask_path: str, output_path: str, threshold: int = 245):
     out = np.zeros((arr.shape[0], arr.shape[1], 4), dtype=np.uint8)
     out[:, :, 3] = shadow_mask.astype(np.uint8) * 255
     Image.fromarray(out).save(output_path)
- 
- 
+def render_orthographic_silhouette(mesh: pv.PolyData, direction: str, image_size=(512, 512)) -> str:
+    """Render a binary silhouette of the mesh from an orthographic camera direction."""
+    p = pv.Plotter(off_screen=True, window_size=image_size)
+    p.set_background("white")
+    p.add_mesh(mesh, color="black", lighting=False)
+
+    if direction == "left":
+        p.camera_position = [(-10, 0, 0), (0, 0, 0), (0, 0, 1)]
+    elif direction == "back":
+        p.camera_position = [(0, 10, 0), (0, 0, 0), (0, 0, 1)]
+    elif direction == "top":
+        p.camera_position = [(0, 0, 10), (0, 0, 0), (0, 1, 0)]
+
+    p.camera.parallel_projection = True
+    p.camera.parallel_scale = 1.2
+    p.enable_anti_aliasing()
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        tmp_path = f.name
+    p.screenshot(tmp_path)
+    p.close()
+    return tmp_path
+
+
 def render_shadow_preview(
     stl_path: str,
     output_path: str,
-    shadow_images=None,
+    shadow_images=None,   # kept for API compat but ignored
     window_size=(1200, 900),
 ):
     stl_path = str(stl_path)
     output_path = str(output_path)
- 
-    if shadow_images is None:
-        shadow_images = []
- 
+
     plotter = pv.Plotter(off_screen=True, window_size=window_size)
     plotter.set_background("#393939")
- 
+
     mesh = pv.read(stl_path)
     mesh = normalize_mesh(mesh, target_size=1.6)
- 
+
     room_size = 5.0
     wall_height = 5.0
     half = room_size / 2.0
     eps = 0.01
     floor_z = -1.2
     wall_center_z = floor_z + wall_height / 2.0
- 
+
     mesh.translate(
-        (
-            -mesh.center[0],
-            -mesh.center[1],
-            wall_center_z - mesh.center[2],
-        ),
+        (-mesh.center[0], -mesh.center[1], wall_center_z - mesh.center[2]),
         inplace=True,
     )
- 
+
     plotter.add_mesh(mesh, color="#a3a3a3", smooth_shading=True, specular=0.15, diffuse=0.85)
- 
+
     walls = [
         {
             "center": (-half, 0, wall_center_z),
             "u": (0, 1, 0), "v": (0, 0, 1),
             "width": room_size, "height": wall_height,
             "decal_center": (-half + eps, 0, wall_center_z),
+            "direction": "left",
         },
         {
             "center": (0, half, wall_center_z),
             "u": (1, 0, 0), "v": (0, 0, 1),
             "width": room_size, "height": wall_height,
             "decal_center": (0, half - eps, wall_center_z),
+            "direction": "back",
         },
         {
             "center": (0, 0, floor_z),
             "u": (1, 0, 0), "v": (0, 1, 0),
             "width": room_size, "height": room_size,
             "decal_center": (0, 0, floor_z + eps),
+            "direction": "top",
         },
     ]
- 
+
     for wall_cfg in walls:
         wall = make_wall(
             center=wall_cfg["center"],
@@ -134,88 +152,41 @@ def render_shadow_preview(
         )
         plotter.add_mesh(wall, color="#d8d8d8", ambient=0.75, diffuse=0.8, show_edges=False)
         add_wall_border(plotter, wall, color="#9D9D9D", line_width=0.015)
- 
+
+    # Generate orthographic silhouettes and project as shadow decals
+    generated_shadows = []
+    for wall_cfg in walls:
+        tmp_silhouette = render_orthographic_silhouette(mesh, wall_cfg["direction"])
+        generated_shadows.append(tmp_silhouette)
+
     with tempfile.TemporaryDirectory() as tmpdir:
-        for i, mask_path in enumerate(shadow_images[:3]):
-            if mask_path is None:
-                continue
+        for i, (mask_path, wall_cfg) in enumerate(zip(generated_shadows, walls)):
             shadow_png = Path(tmpdir) / f"shadow_{i}.png"
-            make_shadow_texture(mask_path, shadow_png)
-            wall_cfg = walls[i]
+            make_shadow_texture(mask_path, shadow_png, threshold=200)
+
             decal = make_wall(
                 center=wall_cfg["decal_center"],
                 u_vec=wall_cfg["u"],
                 v_vec=wall_cfg["v"],
-                width=wall_cfg["width"] * 0.3,
-                height=wall_cfg["height"] * 0.3,
+                width=wall_cfg["width"] * 0.6,   # larger since it fills the wall
+                height=wall_cfg["height"] * 0.6,
             )
             plotter.add_mesh(decal, texture=pv.read_texture(str(shadow_png)), lighting=False, show_edges=False)
- 
+
         plotter.add_light(pv.Light(position=(3, -4, 5), intensity=0.8))
         plotter.add_light(pv.Light(position=(-4, -3, 3), intensity=0.4))
         plotter.camera_position = [(6.5, -7.5, 5.0), (0, 0, 0), (0, 0, 1)]
         plotter.camera.zoom(0.6)
         plotter.enable_anti_aliasing()
         plotter.screenshot(output_path)
- 
+
+    # Cleanup temp silhouette files
+    for p in generated_shadows:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
     plotter.close()
     return output_path
  
- 
-# ── Streamlit UI ──────────────────────────────────────────────────────────────
- 
-st.set_page_config(page_title="3D Shadow Preview", layout="centered")
-st.title("🗿 3D Shadow Preview Renderer")
-st.markdown("Upload an STL file and up to three optional shadow/silhouette images, then click **Render**.")
- 
-stl_file = st.file_uploader("STL file (required)", type=["stl"])
- 
-col1, col2, col3 = st.columns(3)
-with col1:
-    shadow0 = st.file_uploader("Shadow — left wall", type=["png", "jpg", "jpeg", "webp"], key="s0")
-with col2:
-    shadow1 = st.file_uploader("Shadow — back wall", type=["png", "jpg", "jpeg", "webp"], key="s1")
-with col3:
-    shadow2 = st.file_uploader("Shadow — floor", type=["png", "jpg", "jpeg", "webp"], key="s2")
- 
-render_btn = st.button("Render", disabled=(stl_file is None), type="primary")
- 
-if render_btn and stl_file is not None:
-    with st.spinner("Rendering… this may take 15–30 seconds."):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
- 
-            # Write STL
-            stl_path = tmpdir / "model.stl"
-            stl_path.write_bytes(stl_file.read())
- 
-            # Write shadow images
-            shadow_paths = []
-            for i, sf in enumerate([shadow0, shadow1, shadow2]):
-                if sf is not None:
-                    ext = Path(sf.name).suffix
-                    p = tmpdir / f"shadow_{i}{ext}"
-                    p.write_bytes(sf.read())
-                    shadow_paths.append(str(p))
-                else:
-                    shadow_paths.append(None)
- 
-            output_path = tmpdir / "preview.png"
- 
-            try:
-                render_shadow_preview(
-                    stl_path=str(stl_path),
-                    output_path=str(output_path),
-                    shadow_images=shadow_paths,
-                )
-                img_bytes = output_path.read_bytes()
-                st.image(img_bytes, caption="Rendered preview", use_container_width=True)
- 
-                st.download_button(
-                    label="⬇️ Download PNG",
-                    data=img_bytes,
-                    file_name="shadow_preview.png",
-                    mime="image/png",
-                )
-            except Exception as e:
-                st.error(f"Rendering failed: {e}")
