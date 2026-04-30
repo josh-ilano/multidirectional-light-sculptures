@@ -6,4 +6,4 @@ trimesh
 Pillow
 requests
 pyvista
-skimage
+scikit-image
